@@ -22,21 +22,25 @@ interface TelemetryData {
   recorded_at: string;
 }
 
+type OverrideMode = "AUTO" | "FORCE_ON" | "FORCE_OFF";
+
 export default function Dashboard() {
   const [latestData, setLatestData] = useState<TelemetryData | null>(null);
   const [historyData, setHistoryData] = useState<TelemetryData[]>([]);
-  const [controls, setControls] = useState<Record<string, string>>({});
+  const [controls, setControls] = useState<Record<string, OverrideMode>>({});
   const [loading, setLoading] = useState<boolean>(true);
-  const [simCount, setSimCount] = useState<number>(0);
 
-  // FIXED: Re-introduced the missing state hooks for the dashboard banner
   const [autopilotStrain, setAutopilotStrain] = useState<string>("None");
   const [autopilotStage, setAutopilotStage] = useState<string>("OFF");
+
+  const [pendingOverride, setPendingOverride] = useState<{
+    deviceId: string;
+    mode: OverrideMode;
+  } | null>(null);
 
   useEffect(() => {
     async function initDashboard() {
       try {
-        // 1. Load initial 24h history for charts
         const { data: history } = await supabase
           .from("climate_logs")
           .select("temperature, humidity, co2_ppm, recorded_at")
@@ -48,30 +52,28 @@ export default function Dashboard() {
           setLatestData(history[0]);
         }
       } catch (err) {
-        console.error("Historical baseline array load failure:", err);
+        console.error("History build error:", err);
       }
 
       try {
-        // 2. Sync manual override controls states
         const { data: deviceStates } = await supabase
           .from("device_controls")
           .select("device_id, mode");
         if (deviceStates) {
           const mapped = deviceStates.reduce(
             (acc, curr) => {
-              acc[curr.device_id] = curr.mode;
+              acc[curr.device_id] = curr.mode as OverrideMode;
               return acc;
             },
-            {} as Record<string, string>,
+            {} as Record<string, OverrideMode>,
           );
           setControls(mapped);
         }
       } catch (err) {
-        console.error("Switchboard sync error:", err);
+        console.error(err);
       }
 
       try {
-        // 3. Fetch active autopilot profile run status on startup
         const { data: autoState } = await supabase
           .from("autopilot_status")
           .select("*")
@@ -82,7 +84,7 @@ export default function Dashboard() {
           setAutopilotStage(autoState.current_stage);
         }
       } catch (err) {
-        console.error("Autopilot initial state fetch error:", err);
+        console.error(err);
       }
 
       setLoading(false);
@@ -90,31 +92,37 @@ export default function Dashboard() {
 
     initDashboard();
 
-    // Open WebSockets pipe configuration
-    const channel = supabase.channel("tent_alpha_climate", {
-      config: { broadcast: { self: true } },
-    });
+    const dbTrackerChannel = supabase.channel("isolated_db_stream");
 
-    channel
-      .on("broadcast", { event: "telemetry-tick" }, (payload) => {
-        setLatestData(payload.payload as TelemetryData);
-      })
+    dbTrackerChannel
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "climate_logs" },
         (payload) => {
           const freshRow = payload.new as TelemetryData;
-          setHistoryData((prev) => [...prev.slice(1), freshRow]);
+
+          const typedRow: TelemetryData = {
+            temperature: Number(freshRow.temperature),
+            humidity: Number(freshRow.humidity),
+            co2_ppm: Number(freshRow.co2_ppm),
+            recorded_at: freshRow.recorded_at,
+          };
+
+          setHistoryData((prev) => {
+            if (prev.some((row) => row.recorded_at === typedRow.recorded_at))
+              return prev;
+            if (prev.length >= 24) return [...prev.slice(1), typedRow];
+            return [...prev, typedRow];
+          });
+
+          setLatestData(typedRow);
         },
       )
-      // Wildcard listener: catches both updates and initialization inserts perfectly
-      // Replace JUST the autopilot_status block inside your src/app/page.tsx useEffect:
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "autopilot_status" },
         (payload) => {
           if (payload.new && "strain_name" in payload.new) {
-            // Explicitly cast the payload to let TypeScript know these properties exist
             const freshRow = payload.new as {
               strain_name: string;
               current_stage: string;
@@ -124,16 +132,56 @@ export default function Dashboard() {
           }
         },
       )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "device_controls" },
+        (payload) => {
+          if (payload.new) {
+            const row = payload.new as {
+              device_id: string;
+              mode: OverrideMode;
+            };
+            setControls((prev) => ({ ...prev, [row.device_id]: row.mode }));
+          }
+        },
+      )
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      supabase.removeChannel(dbTrackerChannel);
     };
   }, []);
 
-  const sendHybridSimulationTick = async () => {
+  const handleModeChangeAttempt = (
+    deviceId: string,
+    targetMode: OverrideMode,
+  ) => {
+    const isManualOverride =
+      targetMode === "FORCE_ON" || targetMode === "FORCE_OFF";
+    const isAutopilotActive = autopilotStage !== "OFF";
+
+    if (isAutopilotActive && isManualOverride) {
+      setPendingOverride({ deviceId, mode: targetMode });
+    } else {
+      executeModeChange(deviceId, targetMode);
+    }
+  };
+
+  const executeModeChange = async (
+    deviceId: string,
+    targetMode: OverrideMode,
+  ) => {
+    setControls((prev) => ({ ...prev, [deviceId]: targetMode }));
+    setPendingOverride(null);
+    await supabase
+      .from("device_controls")
+      .upsert({ device_id: deviceId, mode: targetMode });
+  };
+
+  const sendSimulationTick = async () => {
     const baseTime = Date.now();
-    const freshPayload: TelemetryData = {
+    const freshPayload = {
+      device_id: "hardware_simulation_node",
       temperature: +(
         20 +
         Math.sin(baseTime * 0.005) * 1.5 +
@@ -150,41 +198,10 @@ export default function Dashboard() {
       recorded_at: new Date().toISOString(),
     };
 
-    await supabase.channel("tent_alpha_climate").send({
-      type: "broadcast",
-      event: "telemetry-tick",
-      payload: freshPayload,
-    });
-
-    setSimCount((prevCount) => {
-      const nextCount = prevCount + 1;
-      if (nextCount % 5 === 0) {
-        supabase
-          .from("climate_logs")
-          .insert([
-            {
-              device_id: "hybrid_simulation_node",
-              temperature: freshPayload.temperature,
-              humidity: freshPayload.humidity,
-              co2_ppm: freshPayload.co2_ppm,
-              recorded_at: freshPayload.recorded_at,
-            },
-          ])
-          .then(() => console.log("DB Snapshot Row Saved."));
-      }
-      return nextCount;
-    });
-  };
-
-  const handleModeChange = async (
-    deviceId: string,
-    targetMode: "AUTO" | "FORCE_ON" | "FORCE_OFF",
-  ) => {
-    setControls((prev) => ({ ...prev, [deviceId]: targetMode }));
-    await supabase
-      .from("device_controls")
-      .update({ mode: targetMode })
-      .eq("device_id", deviceId);
+    const { error } = await supabase
+      .from("climate_logs")
+      .insert([freshPayload]);
+    if (error) console.error("Database rejection:", error.message);
   };
 
   if (loading)
@@ -195,7 +212,54 @@ export default function Dashboard() {
     );
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-8 relative">
+      {/* OVERRIDE WARNING CONFIRMATION DIALOG MODAL */}
+      {pendingOverride && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <Card className="bg-zinc-900 border-zinc-800 max-w-sm w-full p-6 space-y-4 shadow-2xl">
+            <div>
+              <h3 className="text-base font-bold text-zinc-100 flex items-center gap-2">
+                ⚠️ Autopilot Loop Intercept
+              </h3>
+              <p className="text-xs text-zinc-400 mt-2 leading-relaxed">
+                You are forcing the{" "}
+                <span className="text-zinc-200 font-semibold uppercase">
+                  {pendingOverride.deviceId.replace("_", " ")}
+                </span>{" "}
+                to{" "}
+                <span className="text-amber-400 font-bold font-mono">
+                  {pendingOverride.mode}
+                </span>{" "}
+                while{" "}
+                <span className="text-emerald-400 font-bold">
+                  {autopilotStrain}
+                </span>{" "}
+                automation is active.
+              </p>
+            </div>
+            <div className="flex items-center justify-end space-x-2 pt-1">
+              <button
+                onClick={() => setPendingOverride(null)}
+                className="px-3 py-1.5 text-xs text-zinc-400 bg-zinc-800 rounded-md"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() =>
+                  executeModeChange(
+                    pendingOverride.deviceId,
+                    pendingOverride.mode,
+                  )
+                }
+                className="px-3 py-1.5 text-xs font-bold text-white bg-amber-600 rounded-md"
+              >
+                Force Override
+              </button>
+            </div>
+          </Card>
+        </div>
+      )}
+
       {/* GLOBAL AUTOPILOT NOTIFICATION BANNER */}
       {autopilotStage !== "OFF" && (
         <div className="w-full p-4 border border-emerald-500/30 bg-emerald-950/20 rounded-xl flex items-center justify-between text-sm animate-in fade-in slide-in-from-top-4 duration-300">
@@ -206,12 +270,12 @@ export default function Dashboard() {
                 Autopilot Engaged:
               </span>{" "}
               Now cultivating{" "}
-              <span className="font-bold text-white underline decoration-emerald-500/50 decoration-2">
+              <span className="font-bold text-white underline decoration-emerald-500/50">
                 {autopilotStrain}
               </span>
             </div>
           </div>
-          <div className="flex items-center space-x-2 font-mono text-xs bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-md text-emerald-400 font-bold tracking-wide">
+          <div className="flex items-center space-x-2 font-mono text-xs bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-md text-emerald-400 font-bold">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
             CURRENT STAGE: {autopilotStage}
           </div>
@@ -222,24 +286,16 @@ export default function Dashboard() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Command Center</h1>
           <p className="text-sm text-zinc-400">
-            Hybrid Real-Time Broadcast & Time-Series Engine
+            Continuous Live Time-Series Engine
           </p>
         </div>
 
-        <div className="flex items-center space-x-3 bg-zinc-900 border border-zinc-800 p-1.5 rounded-lg">
-          <span className="text-[10px] font-mono text-zinc-400 px-2">
-            Clicks until DB snapshot:{" "}
-            <span className="text-emerald-400 font-bold">
-              {5 - (simCount % 5)}
-            </span>
-          </span>
-          <button
-            onClick={sendHybridSimulationTick}
-            className="px-3 py-1.5 bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-zinc-100 text-xs font-semibold rounded font-mono shadow transition-all"
-          >
-            ⚡ Broadcast Tick
-          </button>
-        </div>
+        <button
+          onClick={sendSimulationTick}
+          className="px-4 py-2 bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-100 text-xs font-bold rounded-lg font-mono shadow transition-all active:scale-[0.98]"
+        >
+          🚀 Log Live Sensor Row
+        </button>
       </div>
 
       {/* Metric Cards Grid */}
@@ -282,12 +338,14 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      {/* Charts + Switchboard Grid Area */}
+      {/* Charts Layout Section */}
       <div className="grid gap-6 md:grid-cols-3">
-        <div className="md:col-span-2 space-y-6">
+        {/* FIXED CONTAINER: Appended "min-w-0" to force layout recalculations on data insertion loops */}
+        <div className="md:col-span-2 space-y-6 min-w-0">
           <Card className="bg-zinc-900 border-zinc-800 p-4 shadow-xl">
             <div className="h-[180px] w-full text-xs font-mono">
-              <ResponsiveContainer width="100%" height="100%">
+              {/* FIXED: Shifted from height="100%" to a stable numeric height anchor */}
+              <ResponsiveContainer width="100%" height={180}>
                 <LineChart data={historyData} margin={{ left: -20, right: 10 }}>
                   <CartesianGrid
                     strokeDasharray="3 3"
@@ -338,7 +396,8 @@ export default function Dashboard() {
 
           <Card className="bg-zinc-900 border-zinc-800 p-4 shadow-xl">
             <div className="h-[150px] w-full text-xs font-mono">
-              <ResponsiveContainer width="100%" height="100%">
+              {/* FIXED: Shifted from height="100%" to a stable numeric height anchor */}
+              <ResponsiveContainer width="100%" height={150}>
                 <LineChart data={historyData} margin={{ left: -10, right: 10 }}>
                   <CartesianGrid
                     strokeDasharray="3 3"
@@ -380,7 +439,7 @@ export default function Dashboard() {
           </Card>
         </div>
 
-        {/* Switchboard panel */}
+        {/* Switchboard Panel */}
         <Card className="bg-zinc-900 border-zinc-800 shadow-xl h-fit">
           <CardHeader>
             <CardTitle className="text-lg font-semibold tracking-tight">
@@ -408,20 +467,24 @@ export default function Dashboard() {
                   </div>
                   <div className="grid grid-cols-3 gap-1 bg-zinc-950 p-1 rounded-lg text-center text-xs font-mono">
                     <button
-                      onClick={() => handleModeChange(device.id, "AUTO")}
-                      className={`py-1.5 rounded transition-all ${currentMode === "AUTO" ? "bg-zinc-800 text-emerald-400 font-bold" : "text-zinc-500"}`}
+                      onClick={() => handleModeChangeAttempt(device.id, "AUTO")}
+                      className={`py-1.5 rounded transition-all ${currentMode === "AUTO" ? "bg-zinc-800 text-emerald-400 font-bold border border-zinc-700/50" : "text-zinc-500"}`}
                     >
                       AUTO
                     </button>
                     <button
-                      onClick={() => handleModeChange(device.id, "FORCE_ON")}
-                      className={`py-1.5 rounded transition-all ${currentMode === "FORCE_ON" ? "bg-blue-600/20 text-blue-400 font-bold" : "text-zinc-500"}`}
+                      onClick={() =>
+                        handleModeChangeAttempt(device.id, "FORCE_ON")
+                      }
+                      className={`py-1.5 rounded transition-all ${currentMode === "FORCE_ON" ? "bg-blue-600/20 text-blue-400 font-bold border border-blue-500/20" : "text-zinc-500"}`}
                     >
                       ON
                     </button>
                     <button
-                      onClick={() => handleModeChange(device.id, "FORCE_OFF")}
-                      className={`py-1.5 rounded transition-all ${currentMode === "FORCE_OFF" ? "bg-rose-600/20 text-rose-400 font-bold" : "text-zinc-500"}`}
+                      onClick={() =>
+                        handleModeChangeAttempt(device.id, "FORCE_OFF")
+                      }
+                      className={`py-1.5 rounded transition-all ${currentMode === "FORCE_OFF" ? "bg-rose-600/20 text-rose-400 font-bold border border-rose-500/20" : "text-zinc-500"}`}
                     >
                       OFF
                     </button>
@@ -435,110 +498,3 @@ export default function Dashboard() {
     </div>
   );
 }
-// export default function Dashboard() {
-//   const [status, setStatus] = useState<string>("Connecting to data layer...");
-//   const [isError, setIsError] = useState<boolean>(false);
-//   const [loading, setLoading] = useState<boolean>(false);
-
-//   useEffect(() => {
-//     async function testConnection() {
-//       try {
-//         const { error } = await supabase
-//           .from("climate_logs")
-//           .select("id")
-//           .limit(1);
-//         if (
-//           error &&
-//           error.code !== "PGRST116" &&
-//           !error.message.includes("policy")
-//         ) {
-//           setIsError(true);
-//           setStatus(`Database Error: ${error.message}`);
-//         } else {
-//           setStatus("Connected! Handshake successful.");
-//         }
-//       } catch (err: any) {
-//         setIsError(true);
-//         setStatus(`Network Exception: ${err.message}`);
-//       }
-//     }
-//     testConnection();
-//   }, []);
-
-//   // Magic function to simulate an ESP32 sending data over time
-//   const seedMockData = async () => {
-//     setLoading(true);
-//     const logs = [];
-//     const now = new Date();
-
-//     // Generate 50 points, spaced 30 minutes apart going backward in time
-//     for (let i = 0; i < 50; i++) {
-//       const logTime = new Date(now.getTime() - i * 30 * 60 * 1000);
-
-//       // Generate realistic fluctuating mushroom room values
-//       const randomTemp = +(
-//         20 +
-//         Math.sin(i * 0.5) * 2 +
-//         Math.random() * 0.5
-//       ).toFixed(2); // 18°C - 22°C
-//       const randomHumidity = +(
-//         88 +
-//         Math.cos(i * 0.3) * 5 +
-//         Math.random() * 2
-//       ).toFixed(2); // 83% - 95%
-//       const randomCO2 = Math.floor(
-//         600 + Math.sin(i * 0.2) * 300 + Math.random() * 100,
-//       ); // 300ppm - 1000ppm
-
-//       logs.push({
-//         device_id: "tent_alpha_prototype",
-//         recorded_at: logTime.toISOString(),
-//         temperature: randomTemp,
-//         humidity: randomHumidity,
-//         co2_ppm: randomCO2,
-//       });
-//     }
-
-//     const { error } = await supabase.from("climate_logs").insert(logs);
-
-//     setLoading(false);
-//     if (error) {
-//       alert(`Failed to seed data: ${error.message}`);
-//     } else {
-//       alert("Successfully inserted 50 mock timeline entries into database!");
-//     }
-//   };
-
-//   return (
-//     <main className="flex min-h-screen flex-col items-center justify-center p-24 bg-zinc-950 text-white">
-//       <div className="p-8 border border-zinc-800 rounded-xl bg-zinc-900 shadow-2xl max-w-md text-center space-y-6">
-//         <div>
-//           <h1 className="text-2xl font-bold tracking-tight mb-2">
-//             🍄 ShroomOS Hub
-//           </h1>
-//           <p
-//             className={`font-mono text-xs p-2 rounded bg-black/40 ${isError ? "text-rose-400" : "text-emerald-400"}`}
-//           >
-//             {status}
-//           </p>
-//         </div>
-
-//         <div className="border-t border-zinc-800 pt-6 space-y-3">
-//           <p className="text-xs text-zinc-400 text-left">
-//             Before we build visual charts, we need data. Click below to simulate
-//             24 hours of telemetry from a fake ESP32 device.
-//           </p>
-//           <button
-//             onClick={seedMockData}
-//             disabled={loading}
-//             className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white font-medium rounded-lg text-sm transition-all shadow-lg active:scale-[0.98]"
-//           >
-//             {loading
-//               ? "Injecting telemetry streams..."
-//               : "⚡ Seed 24h Telemetry Data"}
-//           </button>
-//         </div>
-//       </div>
-//     </main>
-//   );
-// }
