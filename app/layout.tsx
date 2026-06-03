@@ -52,7 +52,7 @@ export default function RootLayout({
                 <Link href="/autopilot" className={getNavStyle("/autopilot")}>
                   <span>🚀</span> <span>Autopilot</span>
                 </Link>
-                <Link href="#" className={getNavStyle("/logs")}>
+                <Link href="/logs" className={getNavStyle("/logs")}>
                   <span>⚠️</span> <span>Alarms & Logs</span>
                 </Link>
               </nav>
@@ -86,7 +86,7 @@ export default function RootLayout({
               <span className="text-lg">🚀</span>
               <span>Autopilot</span>
             </Link>
-            <Link href="#" className={getMobileNavStyle("/logs")}>
+            <Link href="/logs" className={getMobileNavStyle("/logs")}>
               <span className="text-lg">⚠️</span>
               <span>Logs</span>
             </Link>
