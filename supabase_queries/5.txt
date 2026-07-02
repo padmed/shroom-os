@@ -1,0 +1,8 @@
+-- 1. Detach the table cleanly (Postgres syntax requires removing "IF EXISTS" here)
+ALTER PUBLICATION supabase_realtime DROP TABLE public.climate_logs;
+
+-- 2. Force the table to log its full row identity (Required for reliable WebSocket tracking)
+ALTER TABLE public.climate_logs REPLICA IDENTITY FULL;
+
+-- 3. Re-attach the table fresh to the active real-time broadcast stream
+ALTER PUBLICATION supabase_realtime ADD TABLE public.climate_logs;

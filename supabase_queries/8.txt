@@ -1,0 +1,11 @@
+-- 1. Explicitly force the RLS engine to step down for this table
+ALTER TABLE public.autopilot_status DISABLE ROW LEVEL SECURITY;
+
+-- 2. Just in case your Supabase project settings override the disable command, 
+-- create an explicit "Allow Everyone To Do Everything" policy rule
+CREATE POLICY "Allow public access to autopilot" 
+ON public.autopilot_status 
+FOR ALL 
+TO public 
+USING (true) 
+WITH CHECK (true);

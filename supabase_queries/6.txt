@@ -1,0 +1,11 @@
+-- 1. Wipe out the old primary key constraint (usually named table_name_pkey)
+ALTER TABLE public.device_controls DROP CONSTRAINT IF EXISTS device_controls_pkey;
+
+-- 2. Drop the redundant default 'id' column since our code doesn't use it
+ALTER TABLE public.device_controls DROP COLUMN IF EXISTS id;
+
+-- 3. Now that the floor is clear, set device_id as the single, true Primary Key
+ALTER TABLE public.device_controls ADD PRIMARY KEY (device_id);
+
+-- 4. Lower the security shields for prototyping
+ALTER TABLE public.device_controls DISABLE ROW LEVEL SECURITY;

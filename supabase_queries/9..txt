@@ -1,0 +1,2 @@
+-- Explicitly add the autopilot status table to the realtime broadcast stream
+ALTER PUBLICATION supabase_realtime ADD TABLE public.autopilot_status;

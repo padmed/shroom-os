@@ -1,0 +1,16 @@
+-- 1. Obliterate the old real-time tracking publication entirely
+DROP PUBLICATION IF EXISTS supabase_realtime;
+
+-- 2. Build a fresh, clean real-time broadasting system from scratch
+CREATE PUBLICATION supabase_realtime;
+
+-- 3. Securely lock the replica profiles to stream full rows
+ALTER TABLE public.climate_logs REPLICA IDENTITY FULL;
+ALTER TABLE public.autopilot_status REPLICA IDENTITY FULL;
+ALTER TABLE public.device_controls REPLICA IDENTITY FULL;
+
+-- 4. Explicitly sign your tables up to the active real-time broadcasting stream
+ALTER PUBLICATION supabase_realtime ADD TABLE 
+    public.climate_logs, 
+    public.autopilot_status, 
+    public.device_controls;

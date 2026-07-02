@@ -1,0 +1,11 @@
+CREATE TABLE public.climate_logs (
+    id BIGSERIAL PRIMARY KEY,
+    device_id VARCHAR(50) NOT NULL,
+    recorded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    temperature NUMERIC(4, 2),
+    humidity NUMERIC(4, 2),
+    co2_ppm INT
+);
+
+-- This index optimizes performance for your time-series line charts later
+CREATE INDEX idx_climate_time ON public.climate_logs (recorded_at DESC);

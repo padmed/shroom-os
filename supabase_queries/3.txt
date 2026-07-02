@@ -1,0 +1,78 @@
+-- 1. Force a CASCADE drop to completely clear old conflicting tables
+DROP TABLE IF EXISTS public.climate_logs CASCADE;
+DROP TABLE IF EXISTS public.device_controls CASCADE;
+DROP TABLE IF EXISTS public.autopilot_status CASCADE;
+DROP TABLE IF EXISTS public.growth_blueprints CASCADE;
+
+-- 2. Create climate_logs (Matches app/page.tsx exactly)
+CREATE TABLE public.climate_logs (
+    id BIGSERIAL PRIMARY KEY,
+    device_id VARCHAR(50) NOT NULL DEFAULT 'hardware_simulation_node',
+    temperature NUMERIC NOT NULL,
+    humidity NUMERIC NOT NULL,
+    co2_ppm INTEGER NOT NULL,
+    recorded_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 3. Create device_controls (Matches app/page.tsx exactly)
+CREATE TABLE public.device_controls (
+    device_id VARCHAR(50) PRIMARY KEY,
+    mode VARCHAR(20) NOT NULL DEFAULT 'AUTO'
+);
+
+-- 4. Create autopilot_status (Matches app/autopilot/page.tsx exactly)
+CREATE TABLE public.autopilot_status (
+    id INT PRIMARY KEY DEFAULT 1,
+    strain_name VARCHAR(100) NOT NULL DEFAULT 'None',
+    current_stage VARCHAR(50) NOT NULL DEFAULT 'OFF',
+    started_at TIMESTAMPTZ -- <-- This was causing your 400 error!
+);
+
+-- 5. Create growth_blueprints (Matches app/autopilot/page.tsx exactly)
+CREATE TABLE public.growth_blueprints (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    strain_name VARCHAR(100) NOT NULL,
+    is_custom BOOLEAN DEFAULT false,
+    incubation_days INT,
+    incubation_temp NUMERIC,
+    incubation_humidity NUMERIC,
+    incubation_co2 INT,
+    pinning_days INT,
+    pinning_temp NUMERIC,
+    pinning_humidity NUMERIC,
+    pinning_co2 INT,
+    fruiting_days INT,
+    fruiting_temp NUMERIC,
+    fruiting_humidity NUMERIC,
+    fruiting_co2 INT
+);
+
+-- 6. Seed default Autopilot Status (Row 1)
+INSERT INTO public.autopilot_status (id, strain_name, current_stage) 
+VALUES (1, 'None', 'OFF');
+
+-- 7. Seed default Mushroom Blueprints so your Autopilot UI has data
+INSERT INTO public.growth_blueprints 
+(strain_name, is_custom, incubation_days, incubation_temp, incubation_humidity, incubation_co2, pinning_days, pinning_temp, pinning_humidity, pinning_co2, fruiting_days, fruiting_temp, fruiting_humidity, fruiting_co2)
+VALUES 
+('Blue Oyster', false, 14, 24.0, 90.0, 2000, 4, 16.0, 95.0, 600, 7, 18.0, 85.0, 800),
+('Lion''s Mane', false, 14, 24.0, 90.0, 2000, 4, 18.0, 95.0, 800, 7, 21.0, 85.0, 800),
+('Red Reishi', false, 14, 25.0, 75.0, 2000, 4, 25.0, 80.0, 1500, 7, 25.0, 75.0, 2000);
+
+-- 8. Reset full row replication identities for WebSockets
+ALTER TABLE public.climate_logs REPLICA IDENTITY FULL;
+ALTER TABLE public.device_controls REPLICA IDENTITY FULL;
+ALTER TABLE public.autopilot_status REPLICA IDENTITY FULL;
+ALTER TABLE public.growth_blueprints REPLICA IDENTITY FULL;
+
+-- 9. Rebuild the real-time broadcasting publication tower
+DROP PUBLICATION IF EXISTS supabase_realtime;
+CREATE PUBLICATION supabase_realtime;
+ALTER PUBLICATION supabase_realtime ADD TABLE 
+    public.climate_logs, 
+    public.device_controls, 
+    public.autopilot_status,
+    public.growth_blueprints;
+
+-- 10. CRITICAL: Flush Supabase's network cache to read the new schema instantly
+NOTIFY pgrst, 'reload schema';

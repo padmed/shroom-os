@@ -1,0 +1,15 @@
+CREATE TABLE public.autopilot_status (
+    id INT PRIMARY KEY DEFAULT 1, -- We only need one row to track the active tent state
+    strain_name VARCHAR(100) NOT NULL DEFAULT 'None',
+    current_stage VARCHAR(50) NOT NULL DEFAULT 'OFF', -- 'OFF', 'INCUBATION', 'PINNING', 'FRUITING'
+    started_at TIMESTAMP WITH TIME ZONE,
+    CONSTRAINT single_row CHECK (id = 1) -- Enforces that only one active run can exist at a time
+);
+
+-- Seed the initial offline state
+INSERT INTO public.autopilot_status (id, strain_name, current_stage) 
+VALUES (1, 'None', 'OFF')
+ON CONFLICT (id) DO NOTHING;
+
+-- Lower shields for prototyping
+ALTER TABLE public.autopilot_status DISABLE ROW LEVEL SECURITY;

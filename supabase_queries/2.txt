@@ -1,0 +1,15 @@
+INSERT INTO public.climate_logs (device_id, temperature, humidity, co2_ppm, recorded_at)
+SELECT 
+    'hardware_simulation_node',
+    -- Generate random temp between 18.00 and 24.00
+    ROUND((18 + (random() * 6))::numeric, 2), 
+    
+    -- Generate random humidity between 85.00 and 95.00
+    ROUND((85 + (random() * 10))::numeric, 2), 
+    
+    -- Generate random CO2 between 600 and 900
+    (600 + (random() * 300))::int,
+    
+    -- Space each row exactly 15 minutes apart, going backwards in time
+    NOW() - (interval '15 minutes' * seq)
+FROM generate_series(1, 40) as seq;

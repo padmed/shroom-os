@@ -1,0 +1,16 @@
+CREATE TABLE public.device_controls (
+    device_id VARCHAR(50) PRIMARY KEY, -- 'humidifier', 'exhaust_fan', 'intake_fan', 'heater'
+    mode VARCHAR(20) NOT NULL DEFAULT 'AUTO', -- 'AUTO', 'FORCE_ON', 'FORCE_OFF'
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Seed the initial states so the UI has something to read immediately
+INSERT INTO public.device_controls (device_id, mode) VALUES
+('humidifier', 'AUTO'),
+('exhaust_fan', 'AUTO'),
+('intake_fan', 'AUTO'),
+('heater', 'AUTO')
+ON CONFLICT (device_id) DO NOTHING;
+
+-- Temporarily lower the security gate for prototyping
+ALTER TABLE public.device_controls DISABLE ROW LEVEL SECURITY;
